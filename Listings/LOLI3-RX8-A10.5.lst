@@ -1,0 +1,1588 @@
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 1   
+
+
+C51 COMPILER V9.60.0.0, COMPILATION OF MODULE LOLI3_RX8_A10_5
+OBJECT MODULE PLACED IN .\Objects\LOLI3-RX8-A10.5.obj
+COMPILER INVOKED BY: D:\soft\C51\BIN\C51.EXE LOLI3-RX8-A10.5.c LARGE OPTIMIZE(8,SPEED) BROWSE DEBUG OBJECTEXTEND PRINT(.
+                    -\Listings\LOLI3-RX8-A10.5.lst) TABS(2) OBJECT(.\Objects\LOLI3-RX8-A10.5.obj)
+
+line level    source
+
+   1          //#include<reg51.h>  有了STC8Gxx.h就不需要了
+   2          #include<intrins.h>
+   3          #include<STC8Gxx.h>
+   4          #define u8 unsigned char
+   5          #define u16 unsigned int
+   6          #define  u32 unsigned long
+   7          /**************************************************************************/
+   8          /*
+   9          时间：2020年7月4日
+  10          
+  11          修改者：北纬30°@qq156557548
+  12          
+  13          主要功能：
+  14                    1.适配STC8G1K08-20PIN，共8个输出通道
+  15                    2.将对频方式更改为按键对频，按住按键通电开机即可对频
+  16                    3.使用了内部基准源，回传电压比以前精确很多
+  17          
+  18          存在问题：
+  19                    1.CH7无法使用PWM输出模式，而且调到PWM模式后会导致CH3无法使用
+  20                 （可能没什么人会用第7通道PWM但还是注意为好）
+  21                    2.PPM、S.BUS未测试，示波器观察波形没有问题
+  22          
+  23          备注：
+  24                    水平所限，实在惭愧，未解决的问题还有待各位大神解决。
+  25                    本程序由"萝丽三代6通接送机A10.5源码"修改得来，继承其开源属性，
+  26                仅小范围修改了部分寄存器地址以及算法。
+  27                    还请大家多多支持萝丽，开源不易。
+  28          */
+  29          /**************************************************************************/
+  30          //引脚定义
+  31          
+  32          sbit RC=P1^2;   //对频按键
+  33          sbit LED=P1^0;  //定义指示灯
+  34          sbit EXT=P1^1;  //扩展脚位
+  35                          //POWER_ADC=P1^3电池电压检测在P1.3脚
+  36          sbit CH1=P3^7;  //定义8个通道输出
+  37          sbit CH2=P3^6;
+  38          sbit CH3=P3^5;
+  39          sbit CH4=P3^4;
+  40          sbit CH5=P3^3;
+  41          sbit CH6=P3^2;
+  42          sbit CH7=P3^1;
+  43          sbit CH8=P3^0;
+  44          
+  45          sbit IRQ=P1^4;//定义无线模块的管脚
+  46          sbit MDO=P1^5;
+  47          sbit MDI=P1^6;
+  48          sbit SCK=P1^7;
+  49          sbit CSN=P5^4;
+  50          sbit CE=P5^5;
+  51          
+  52          /**************************************************************************/
+  53          
+  54          u8 code random[100]= {4,1,3,2,2,1,0,0,2,2,2,3,4,1,2,1,4,3,3,4, //随机跳频序列
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 2   
+
+  55                                2,0,2,2,3,1,2,3,2,2,2,4,2,4,0,3,4,2,3,1,
+  56                                0,3,1,3,3,0,2,0,4,3,3,3,3,3,4,1,1,4,3,0,
+  57                                1,0,3,2,3,2,3,3,4,4,1,3,0,0,3,1,3,3,3,0,
+  58                                3,3,4,1,2,4,1,3,0,1,3,4,4,3,2,3,1,2,3,3
+  59                               };
+  60          //数据保存
+  61          bit Data_change;
+  62          u8 xdata TEMP_DATA[50];
+  63          
+  64          //无线通信
+  65          u8 rx[11];    //接收的11字节数据
+  66          u8 tx[11];
+  67          u8 m;
+  68          u8 hopping_turn,hopping_num,hopping_count;
+  69          u8 xdata address[5];
+  70          u8 code address_0[5]= {'L','O','V','E','!'}; //使用LOVE作为对频暗语
+  71          u8 hopping[5]= {10,35,60,85,110};
+  72          bit first,restar;
+  73          bit connecting,lose;
+  74          bit jump_1,jump_2,jump_mode;
+  75          u8 NRF_error=0;
+  76          u8 TX_power=3;
+  77          //通道输出
+  78          u16 xdata timer1=0,timer2=0,timer3=0,timer4=0,timer5=0;
+  79          u8 xdata rx_num=0,receive=0;
+  80          u8 xdata Light_LED=0;
+  81          u16 xdata out_control_data[8]= {511,511,80,511,511,511,511,511};
+  82          u16 CH_data[8]= {0,1024,0,1024,0,1024};
+  83          u16 data buff[8];
+  84          u16 temp1,temp2;
+  85          u8 t_output;
+  86          
+  87          //电压检测
+  88          u8 t_adc;
+  89          u16 adc1,adc2;
+  90          u32 idata last_adc1,last_adc2;
+  91          u16 voltage_bec,voltage_total;
+  92          u16 *BGV;
+  93          
+  94          //PPM
+  95          u8 t_PPMout;
+  96          u8 T_h,T_l;
+  97          bit PPM_OUT;
+  98          bit CH1_SW,CH2_SW,CH3_SW,CH4_SW,CH5_SW,CH6_SW,CH7_SW,CH8_SW;
+  99          bit CH1_PWM,CH2_PWM,CH7_PWM;
+ 100          
+ 101          //SBUS
+ 102          bit SBUS;
+ 103          u8 t_sbus;
+ 104          u8 xdata Sbus_buff[25],Sbus_tx[25];
+ 105          u16 xdata Sbus_data[8];
+ 106          
+ 107          /**************************************************************************/
+ 108          //延时函数
+ 109          void Delay1ms()   //@12.000MHz
+ 110          {
+ 111   1        unsigned char i, j;
+ 112   1      
+ 113   1        i = 16;
+ 114   1        j = 147;
+ 115   1        do
+ 116   1        {
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 3   
+
+ 117   2          while (--j);
+ 118   2        } while (--i);
+ 119   1      }
+ 120          
+ 121          void delay_ms(u16 i)
+ 122          {
+ 123   1          while(i--)
+ 124   1              Delay1ms();
+ 125   1      }
+ 126          
+ 127          /**************************************************************************/
+ 128          //ROM存储
+ 129          u8 EEPROM_read(u8 address_H,u16 address_L)  //读数据
+ 130          {
+ 131   1          IAP_CMD=0x01;
+ 132   1          if(address_L>255)
+ 133   1          {
+ 134   2              IAP_ADDRH=address_H+1;
+ 135   2              IAP_ADDRL=address_L-255;
+ 136   2          }
+ 137   1          else
+ 138   1          {
+ 139   2              IAP_ADDRH=address_H;
+ 140   2              IAP_ADDRL=address_L;
+ 141   2          }
+ 142   1      
+ 143   1          IAP_TRIG=0x5a;
+ 144   1          IAP_TRIG=0xa5;
+ 145   1          _nop_();
+ 146   1          return IAP_DATA;
+ 147   1      }
+ 148          
+ 149          void EEPROM_write(u8 address_H,u16 address_L,u8 byte) //写入数据
+ 150          {
+ 151   1          IAP_CMD=0x02;
+ 152   1          IAP_DATA=byte;
+ 153   1          if(address_L>255)
+ 154   1          {
+ 155   2              IAP_ADDRH=address_H+1;
+ 156   2              IAP_ADDRL=address_L-255;
+ 157   2          }
+ 158   1          else
+ 159   1          {
+ 160   2              IAP_ADDRH=address_H;
+ 161   2              IAP_ADDRL=address_L;
+ 162   2          }
+ 163   1      
+ 164   1          IAP_TRIG=0x5a;
+ 165   1          IAP_TRIG=0xa5;
+ 166   1          _nop_();
+ 167   1      }
+ 168          
+ 169          void EEPROM_clean(u8 address_H) //擦除数据
+ 170          {
+ 171   1          IAP_CMD=0x03;
+ 172   1          IAP_ADDRH=address_H;
+ 173   1          IAP_ADDRL=0;
+ 174   1          IAP_TRIG=0x5a;
+ 175   1          IAP_TRIG=0xa5;
+ 176   1          _nop_();
+ 177   1          _nop_();
+ 178   1      }
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 4   
+
+ 179          
+ 180          u8 EEPROM_test(u8 address_H)
+ 181          {
+ 182   1          IAP_CONTR=0x83;
+ 183   1      
+ 184   1          EEPROM_clean(address_H);
+ 185   1          EEPROM_write(address_H,0,0x88);
+ 186   1          if(EEPROM_read(address_H,0)==0x88)
+ 187   1          {
+ 188   2              EEPROM_clean(address_H);
+ 189   2              EEPROM_write(address_H,0,0x55);
+ 190   2              if(EEPROM_read(address_H,0)==0x55)
+ 191   2              {
+ 192   3                  return 1;
+ 193   3              }
+ 194   2          }
+ 195   1      
+ 196   1          return 0;
+ 197   1      }
+ 198          
+ 199          
+ 200          
+ 201          void DATA_read()
+ 202          {
+ 203   1          u8 i;
+ 204   1          u16 sum=0,sum_read;
+ 205   1      
+ 206   1          IAP_CONTR=0x83;
+ 207   1          for(i=0; i<40; i++)
+ 208   1          {
+ 209   2              TEMP_DATA[i]=EEPROM_read(0,i);
+ 210   2              sum+=TEMP_DATA[i];
+ 211   2          }
+ 212   1      
+ 213   1          sum_read=EEPROM_read(0,40);//读校验和
+ 214   1          sum_read<<=8;
+ 215   1          sum_read+=EEPROM_read(0,41);
+ 216   1      
+ 217   1          if(TEMP_DATA[0]!=0xab||sum!=sum_read)//比较校验和
+ 218   1          {
+ 219   2              first=1;
+ 220   2          }
+ 221   1          else
+ 222   1          {
+ 223   2              hopping[0]=TEMP_DATA[1];
+ 224   2              hopping[1]=TEMP_DATA[2];
+ 225   2              hopping[2]=TEMP_DATA[3];
+ 226   2              hopping[3]=TEMP_DATA[4];
+ 227   2              hopping[4]=TEMP_DATA[5];
+ 228   2              address[0]=TEMP_DATA[6];
+ 229   2              address[1]=TEMP_DATA[7];
+ 230   2              address[2]=TEMP_DATA[8];
+ 231   2              address[3]=TEMP_DATA[9];
+ 232   2              address[4]=TEMP_DATA[10];
+ 233   2      
+ 234   2              out_control_data[0]=TEMP_DATA[11];
+ 235   2              out_control_data[0]<<=8;
+ 236   2              out_control_data[0]+=TEMP_DATA[12];
+ 237   2              out_control_data[1]=TEMP_DATA[13];
+ 238   2              out_control_data[1]<<=8;
+ 239   2              out_control_data[1]+=TEMP_DATA[14];
+ 240   2              out_control_data[2]=TEMP_DATA[15];
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 5   
+
+ 241   2              out_control_data[2]<<=8;
+ 242   2              out_control_data[2]+=TEMP_DATA[16];
+ 243   2              out_control_data[3]=TEMP_DATA[17];
+ 244   2              out_control_data[3]<<=8;
+ 245   2              out_control_data[3]+=TEMP_DATA[18];
+ 246   2              out_control_data[4]=TEMP_DATA[19];
+ 247   2              out_control_data[4]<<=8;
+ 248   2              out_control_data[4]+=TEMP_DATA[20];
+ 249   2              out_control_data[5]=TEMP_DATA[21];
+ 250   2              out_control_data[5]<<=8;
+ 251   2              out_control_data[5]+=TEMP_DATA[22];
+ 252   2              out_control_data[6]=TEMP_DATA[23];
+ 253   2              out_control_data[6]<<=8;
+ 254   2              out_control_data[6]+=TEMP_DATA[24];
+ 255   2              out_control_data[7]=TEMP_DATA[25];
+ 256   2              out_control_data[7]<<=8;
+ 257   2              out_control_data[7]+=TEMP_DATA[26];
+ 258   2      
+ 259   2              PPM_OUT=TEMP_DATA[27];
+ 260   2              CH1_PWM=TEMP_DATA[28];
+ 261   2              CH2_PWM=TEMP_DATA[29];
+ 262   2              CH7_PWM=TEMP_DATA[30];
+ 263   2              CH1_SW=TEMP_DATA[31];
+ 264   2              CH2_SW=TEMP_DATA[32];
+ 265   2              CH3_SW=TEMP_DATA[33];
+ 266   2              CH4_SW=TEMP_DATA[34];
+ 267   2              CH5_SW=TEMP_DATA[35];
+ 268   2              CH6_SW=TEMP_DATA[36];
+ 269   2              CH7_SW=TEMP_DATA[37];
+ 270   2              CH8_SW=TEMP_DATA[38];
+ 271   2              SBUS=TEMP_DATA[39];
+ 272   2          }
+ 273   1      
+ 274   1          IAP_CONTR=0;
+ 275   1      }
+ 276          void DATA_save()
+ 277          {
+ 278   1          u8 i;
+ 279   1          u16 sum;
+ 280   1      
+ 281   1          TEMP_DATA[0]=0xab;
+ 282   1      
+ 283   1          TEMP_DATA[1]=hopping[0];  //修改目标模型数据
+ 284   1          TEMP_DATA[2]=hopping[1];
+ 285   1          TEMP_DATA[3]=hopping[2];
+ 286   1          TEMP_DATA[4]=hopping[3];
+ 287   1          TEMP_DATA[5]=hopping[4];
+ 288   1          TEMP_DATA[6]=address[0];  //修改目标模型数据
+ 289   1          TEMP_DATA[7]=address[1];
+ 290   1          TEMP_DATA[8]=address[2];
+ 291   1          TEMP_DATA[9]=address[3];
+ 292   1          TEMP_DATA[10]=address[4];
+ 293   1      
+ 294   1          TEMP_DATA[11]=out_control_data[0]>>8;
+ 295   1          TEMP_DATA[12]=out_control_data[0];
+ 296   1          TEMP_DATA[13]=out_control_data[1]>>8;
+ 297   1          TEMP_DATA[14]=out_control_data[1];
+ 298   1          TEMP_DATA[15]=out_control_data[2]>>8;
+ 299   1          TEMP_DATA[16]=out_control_data[2];
+ 300   1          TEMP_DATA[17]=out_control_data[3]>>8;
+ 301   1          TEMP_DATA[18]=out_control_data[3];
+ 302   1          TEMP_DATA[19]=out_control_data[4]>>8;
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 6   
+
+ 303   1          TEMP_DATA[20]=out_control_data[4];
+ 304   1          TEMP_DATA[21]=out_control_data[5]>>8;
+ 305   1          TEMP_DATA[22]=out_control_data[5];
+ 306   1          TEMP_DATA[23]=out_control_data[6]>>8;
+ 307   1          TEMP_DATA[24]=out_control_data[6];
+ 308   1          TEMP_DATA[25]=out_control_data[7]>>8;
+ 309   1          TEMP_DATA[26]=out_control_data[7];
+ 310   1      
+ 311   1          TEMP_DATA[27]=PPM_OUT;
+ 312   1          TEMP_DATA[28]=CH1_PWM;
+ 313   1          TEMP_DATA[29]=CH2_PWM;
+ 314   1          TEMP_DATA[30]=CH7_PWM;
+ 315   1          TEMP_DATA[31]=CH1_SW;
+ 316   1          TEMP_DATA[32]=CH2_SW;
+ 317   1          TEMP_DATA[33]=CH3_SW;
+ 318   1          TEMP_DATA[34]=CH4_SW;
+ 319   1          TEMP_DATA[35]=CH5_SW;
+ 320   1          TEMP_DATA[36]=CH6_SW;
+ 321   1          TEMP_DATA[37]=CH7_SW;
+ 322   1          TEMP_DATA[38]=CH8_SW;
+ 323   1          TEMP_DATA[39]=SBUS;
+ 324   1      
+ 325   1          sum=0;
+ 326   1          for(i=0; i<40; i++)
+ 327   1          {
+ 328   2              sum+=TEMP_DATA[i];
+ 329   2          }
+ 330   1          
+ 331   1          TEMP_DATA[40]=sum>>8;//写入校验和
+ 332   1          TEMP_DATA[41]=sum;
+ 333   1      
+ 334   1          IAP_CONTR=0x83;
+ 335   1          EEPROM_clean(0);
+ 336   1      
+ 337   1          for(i=0; i<42; i++)
+ 338   1          {
+ 339   2              EEPROM_write(0,i,TEMP_DATA[i]);
+ 340   2          }
+ 341   1      
+ 342   1          IAP_CONTR=0;
+ 343   1      }
+ 344          /**************************************************************************/
+ 345          //NRF24L01
+ 346          u8 SPI(u8 byte)
+ 347          {
+ 348   1          u8 i;
+ 349   1          for(i=0; i<8; i++)
+ 350   1          {
+ 351   2              MDI=(byte&0x80);
+ 352   2            _nop_();
+ 353   2              SCK=1;
+ 354   2              byte<<=1;
+ 355   2              byte|=MDO;
+ 356   2            _nop_();
+ 357   2              SCK=0;  
+ 358   2          }
+ 359   1          return byte;
+ 360   1      }
+ 361          
+ 362          void REG_write(u8 address,u8 command)
+ 363          {
+ 364   1          CSN=0;
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 7   
+
+ 365   1          SPI(0x20+address);
+ 366   1          SPI(command);
+ 367   1          CSN=1;
+ 368   1      }
+ 369          
+ 370          void FIFO_write(u8 DATA_OUT[],u8 lengh)
+ 371          {
+ 372   1          u8 i;
+ 373   1          CSN=0;
+ 374   1          SPI(0xa0);
+ 375   1          for(i=0; i<lengh; i++)
+ 376   1              SPI(DATA_OUT[i]);
+ 377   1          CSN=1;
+ 378   1      }
+ 379          void FIFO_read(u8 DATA_IN[],u8 lengh)   //读取接收数据缓冲区
+ 380          {
+ 381   1          u8 i;
+ 382   1          CSN=0;
+ 383   1          SPI(0x61);  //读取命令
+ 384   1          for(i=0; i<lengh; i++)
+ 385   1              DATA_IN[i]=SPI(0);
+ 386   1          CSN=1;
+ 387   1      }
+ 388          
+ 389          void TX_address(u8 DATA_IN[])
+ 390          {
+ 391   1          CSN=0;
+ 392   1          SPI(0x20+0x10);
+ 393   1          SPI(DATA_IN[0]);
+ 394   1          SPI(DATA_IN[1]);
+ 395   1          SPI(DATA_IN[2]);
+ 396   1          SPI(DATA_IN[3]);
+ 397   1          SPI(DATA_IN[4]);
+ 398   1          CSN=1;
+ 399   1      }
+ 400          void RX_address(u8 DATA_IN[])
+ 401          {
+ 402   1          CSN=0;
+ 403   1          SPI(0x20+0x0a);
+ 404   1          SPI(DATA_IN[0]);
+ 405   1          SPI(DATA_IN[1]);
+ 406   1          SPI(DATA_IN[2]);
+ 407   1          SPI(DATA_IN[3]);
+ 408   1          SPI(DATA_IN[4]);
+ 409   1          CSN=1;
+ 410   1      }
+ 411          void RX_mode()
+ 412          {
+ 413   1          CE=0;
+ 414   1          REG_write(0x00,0x3b); //CRC,8 bit,Power on,RX
+ 415   1          CE=1;
+ 416   1      }
+ 417          
+ 418          void TX_mode()
+ 419          {
+ 420   1          CE=0;
+ 421   1          REG_write(0x00,0x0a);
+ 422   1          CE=1;
+ 423   1      }
+ 424          
+ 425          void  NRF_power(u8 P)       //发射功率设置 250k
+ 426          {
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 8   
+
+ 427   1          CE=0;
+ 428   1          if(P==3)REG_write(0x06,0x27);     //0db 修正之前注释错误
+ 429   1          else if(P==2)REG_write(0x06,0x25);    //-6db
+ 430   1          else if(P==1)REG_write(0x06,0x23);    //-12db
+ 431   1          else if(P==0)REG_write(0x06,0x21);    //-18db
+ 432   1          CE=1;
+ 433   1      }
+ 434          
+ 435          void NRF_size(u8 l)
+ 436          {
+ 437   1          CE=0;
+ 438   1          REG_write(0x11,l);
+ 439   1          CE=1;
+ 440   1      }
+ 441          
+ 442          void NRF_channel(u8 c)
+ 443          {
+ 444   1          CE=0;
+ 445   1          REG_write(0x05,c);
+ 446   1          CE=1;
+ 447   1      }
+ 448          
+ 449          
+ 450          void NRF_init()
+ 451          {
+ 452   1          CE=0;
+ 453   1          SCK=0;
+ 454   1          REG_write(0x01,0x00); //禁止 自动应答
+ 455   1          REG_write(0x02,0x01); //允许 P0信道
+ 456   1          REG_write(0x04,0x00); //禁止 自动重发
+ 457   1          RX_mode();    //REG_write(0x1d,0x01);
+ 458   1          NRF_channel(66);
+ 459   1          NRF_power(TX_power);
+ 460   1          NRF_size(11);
+ 461   1          RX_address(address);
+ 462   1          TX_address(address);
+ 463   1      }
+ 464          
+ 465          void NRF_test()   //无线模块终极测试
+ 466          {
+ 467   1          u8 reset_err=0;
+ 468   1          CE=0;
+ 469   1          SCK=0;
+ 470   1          CSN=0;
+ 471   1      
+ 472   1          if(SPI(0x20)!=0x0e)reset_err=1;
+ 473   1            
+ 474   1          
+ 475   1          SPI(0x0a);
+ 476   1          CSN=1;
+ 477   1          CSN=0;
+ 478   1          SPI(0x00);
+ 479   1      
+ 480   1          if(SPI(0x00)!=0x0a)NRF_error|=0x02;       //MOSI bad
+ 481   1        
+ 482   1          CSN=1;
+ 483   1          REG_write(0x01,0x00);
+ 484   1          REG_write(0x04,0x00);
+ 485   1          REG_write(0x11,1);
+ 486   1      
+ 487   1          FIFO_write(tx,1);
+ 488   1          CE=1;
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 9   
+
+ 489   1      
+ 490   1          delay_ms(4);
+ 491   1      
+ 492   1          CSN=0;
+ 493   1      
+ 494   1          if(SPI(0x00)!=0x2e)NRF_error|=0x04;   //CE bad
+ 495   1            
+ 496   1          CSN=1;
+ 497   1      
+ 498   1          if(IRQ)NRF_error|=0x18; //IRQ bad
+ 499   1          else if(NRF_error&0x04==0)NRF_error|=0x10;    //MISO bad
+ 500   1          CE=1;
+ 501   1      
+ 502   1          if(reset_err&&NRF_error>1)NRF_error|=0x01;//CSN,CLK bad
+ 503   1      
+ 504   1          REG_write(0x07,0x20); //清除TX中断信号
+ 505   1      }
+ 506          
+ 507          void receiver_connect()
+ 508          {
+ 509   1          u8 t;
+ 510   1          NRF_power(0);
+ 511   1          NRF_channel(33);
+ 512   1          TX_address(address_0);
+ 513   1          RX_address(address_0);
+ 514   1          while(IRQ);
+ 515   1          FIFO_read(rx,11);   //读取接收数据
+ 516   1          CE=0;
+ 517   1          REG_write(0x07,0x40); //清除无线模块中断信号
+ 518   1          CE=1;
+ 519   1          if(rx[0]==0xa0)
+ 520   1          {
+ 521   2              hopping[0]=rx[1];
+ 522   2              hopping[1]=rx[2];
+ 523   2              hopping[2]=rx[3];
+ 524   2              hopping[3]=rx[4];
+ 525   2              hopping[4]=rx[5];
+ 526   2              address[0]=rx[6];
+ 527   2              address[1]=rx[7];
+ 528   2              address[2]=rx[8];
+ 529   2              address[3]=rx[9];
+ 530   2              address[4]=rx[10];
+ 531   2          }
+ 532   1          
+ 533   1          tx[0]='O',tx[1]='K';
+ 534   1          connecting=1;
+ 535   1          
+ 536   1          while(connecting)
+ 537   1          {
+ 538   2              TX_mode();
+ 539   2              NRF_channel(33);
+ 540   2              TX_address(address_0);
+ 541   2              RX_address(address_0);
+ 542   2              FIFO_write(tx,11);
+ 543   2              Delay1ms();
+ 544   2      
+ 545   2              RX_mode();
+ 546   2              NRF_channel(hopping[0]);
+ 547   2              TX_address(address);
+ 548   2              RX_address(address);
+ 549   2              while(1)
+ 550   2              {
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 10  
+
+ 551   3                  Delay1ms();
+ 552   3                  if(IRQ==0)
+ 553   3                  {
+ 554   4                      FIFO_read(rx,11);   //读取接收数据
+ 555   4                      CE=0;
+ 556   4                      REG_write(0x07,0x40); //清除无线模块中断信号
+ 557   4                      CE=1;
+ 558   4                      connecting=0;
+ 559   4                      break;
+ 560   4                  }
+ 561   3                  
+ 562   3                  t++;
+ 563   3                  
+ 564   3                  if(t>100) {
+ 565   4                      t=0;
+ 566   4                      break;
+ 567   4                  }
+ 568   3              }
+ 569   2          }
+ 570   1          DATA_save();
+ 571   1          RX_address(address);
+ 572   1          TX_address(address);
+ 573   1          NRF_power(3);
+ 574   1      }
+ 575          
+ 576          /**************************************************************************/
+ 577          
+ 578          void data_check(int x,int max,int min)
+ 579          {
+ 580   1          if(x>max)x=max;
+ 581   1          if(x<min)x=min;
+ 582   1      }
+ 583          
+ 584          void Get_Sbus_data()
+ 585          {
+ 586   1          Sbus_data[0]=CH_data[0]<<1;
+ 587   1          Sbus_data[1]=CH_data[1]<<1;
+ 588   1          Sbus_data[2]=CH_data[2]<<1;
+ 589   1          Sbus_data[3]=CH_data[3]<<1;
+ 590   1          Sbus_data[4]=CH_data[4]<<1;
+ 591   1          Sbus_data[5]=CH_data[5]<<1;
+ 592   1          Sbus_data[6]=CH_data[6]<<1;
+ 593   1          Sbus_data[7]=CH_data[7]<<1;
+ 594   1      
+ 595   1          Sbus_buff[1]=Sbus_data[0];//CH1~CH8
+ 596   1          Sbus_buff[2]=Sbus_data[0]>>8;
+ 597   1          Sbus_buff[2]+=Sbus_data[1]<<3;
+ 598   1      
+ 599   1          Sbus_buff[3]=Sbus_data[1]>>5;
+ 600   1          Sbus_buff[3]+=Sbus_data[2]<<6;
+ 601   1      
+ 602   1          Sbus_buff[4]=Sbus_data[2]>>2;
+ 603   1      
+ 604   1          Sbus_buff[5]=Sbus_data[2]>>10;
+ 605   1          Sbus_buff[5]+=Sbus_data[3]<<1;
+ 606   1      
+ 607   1          Sbus_buff[6]=Sbus_data[3]>>7;
+ 608   1          Sbus_buff[6]+=Sbus_data[4]<<4;
+ 609   1      
+ 610   1          Sbus_buff[7]=Sbus_data[4]>>4;
+ 611   1          Sbus_buff[7]+=Sbus_data[5]<<7;
+ 612   1      
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 11  
+
+ 613   1          Sbus_buff[8]=Sbus_data[5]>>1;
+ 614   1      
+ 615   1          Sbus_buff[9]=Sbus_data[5]>>9;
+ 616   1          Sbus_buff[9]+=Sbus_data[6]<<2;
+ 617   1      
+ 618   1          Sbus_buff[10]=Sbus_data[6]>>6;
+ 619   1          Sbus_buff[10]+=Sbus_data[7]<<5;
+ 620   1      
+ 621   1          Sbus_buff[11]=Sbus_data[7]>>3;
+ 622   1      
+ 623   1          Sbus_tx[0]=0x0f;//Star
+ 624   1          Sbus_tx[1]=Sbus_buff[1];//CH1~CH8
+ 625   1          Sbus_tx[2]=Sbus_buff[2];
+ 626   1          Sbus_tx[3]=Sbus_buff[3];
+ 627   1          Sbus_tx[4]=Sbus_buff[4];
+ 628   1          Sbus_tx[5]=Sbus_buff[5];
+ 629   1          Sbus_tx[6]=Sbus_buff[6];
+ 630   1          Sbus_tx[7]=Sbus_buff[7];
+ 631   1          Sbus_tx[8]=Sbus_buff[8];
+ 632   1          Sbus_tx[9]=Sbus_buff[9];
+ 633   1          Sbus_tx[10]=Sbus_buff[10];
+ 634   1          Sbus_tx[11]=Sbus_buff[11];
+ 635   1          Sbus_tx[12]=0;//CH9~CH16
+ 636   1          Sbus_tx[13]=0;
+ 637   1          Sbus_tx[14]=0;
+ 638   1          Sbus_tx[15]=0;
+ 639   1          Sbus_tx[16]=0;
+ 640   1          Sbus_tx[17]=0;
+ 641   1          Sbus_tx[18]=0;
+ 642   1          Sbus_tx[19]=0;
+ 643   1          Sbus_tx[20]=0;
+ 644   1          Sbus_tx[21]=0;
+ 645   1          Sbus_tx[22]=0;
+ 646   1          Sbus_tx[23]=0;//flag
+ 647   1          Sbus_tx[24]=0;//End
+ 648   1      }
+ 649          
+ 650          void Cycle()
+ 651          {
+ 652   1          timer1++;
+ 653   1          if(timer1>333)      //每秒统计接收到的有效信号，小于20个点亮LED示警，表示信号微弱
+ 654   1          {
+ 655   2              timer1=333;
+ 656   2              rx_num=0;
+ 657   2              Light_LED=2;
+ 658   2          }
+ 659   1          timer2++;
+ 660   1          if(timer2>333)
+ 661   1          {
+ 662   2              timer2=0;
+ 663   2              rx_num=receive;
+ 664   2              receive=0;
+ 665   2          }
+ 666   1          timer3++;
+ 667   1          if(timer3>666)//信号丢失2秒触发失控保护
+ 668   1          {
+ 669   2              timer3=666;
+ 670   2              CH_data[0]=out_control_data[0];
+ 671   2              CH_data[1]=out_control_data[1];
+ 672   2              CH_data[2]=out_control_data[2];
+ 673   2              CH_data[3]=out_control_data[3];
+ 674   2              CH_data[4]=out_control_data[4];
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 12  
+
+ 675   2              CH_data[5]=out_control_data[5];
+ 676   2              CH_data[6]=out_control_data[6];
+ 677   2              CH_data[7]=out_control_data[7];
+ 678   2      
+ 679   2              Get_Sbus_data();
+ 680   2          }
+ 681   1          if(Data_change)
+ 682   1          {
+ 683   2              timer4++;
+ 684   2              if(timer4>333)
+ 685   2              {
+ 686   3                  timer4=0;
+ 687   3                  Data_change=0;
+ 688   3                  DATA_save();
+ 689   3              }
+ 690   2          }
+ 691   1      
+ 692   1          if(Light_LED==1)
+ 693   1          {
+ 694   2              LED=1;
+ 695   2              timer5++;
+ 696   2              if(timer5>10)
+ 697   2              {
+ 698   3                  timer5=0;
+ 699   3                  Light_LED=0;
+ 700   3              }
+ 701   2          }
+ 702   1          else if(Light_LED==2)LED=1;
+ 703   1          else LED=0;
+ 704   1      
+ 705   1          m++;      //两个标志位循环跳频
+ 706   1          if(jump_1==0)
+ 707   1          {
+ 708   2              if(m>7)lose=0,jump_1=1,jump_2=0;    //未收到信号，开始第一跳
+ 709   2          }
+ 710   1          else
+ 711   1          {
+ 712   2              if(jump_2==0)
+ 713   2              {
+ 714   3                  if(m>14)lose=0,jump_2=1;     //第一跳之后仍无信号，开始第二跳
+ 715   3              }
+ 716   2              else
+ 717   2              {
+ 718   3                  if(m>22)m=0,lose=0,jump_1=0;   //第二跳之后仍无信号，复位重新跳。
+ 719   3              }
+ 720   2          }
+ 721   1          
+ 722   1          
+ 723   1          t_adc++;
+ 724   1          if(t_adc==1)
+ 725   1          {
+ 726   2              adc1=(ADC_RES<<8)|ADC_RESL;
+ 727   2              last_adc1=(adc1/2+last_adc1/2);
+ 728   2            
+ 729   2              ADC_RES=0;   ////准备下一次ADC检测，结果在下面的t_adc=2
+ 730   2              ADC_RESL=0;
+ 731   2              P1IE=0x08;
+ 732   2              ADC_CONTR=0xc3;
+ 733   2          }
+ 734   1          else if(t_adc==2)
+ 735   1          {
+ 736   2              t_adc=0;
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 13  
+
+ 737   2              adc2=(ADC_RES<<8)|ADC_RESL;
+ 738   2              last_adc2=(adc2/2+last_adc2/2);
+ 739   2            
+ 740   2              ADC_RES=0;  //准备下一次ADC检测，结果在上面的t_adc=1
+ 741   2              ADC_RESL=0;
+ 742   2              P1IE=0x00;
+ 743   2              ADC_CONTR=0xcf;
+ 744   2          }
+ 745   1      }
+ 746          
+ 747          /*************************************************************/
+ 748          //串口通信SBUS
+ 749          void UartInit(void)   //100000bps@12.000MHz
+ 750          {
+ 751   1          SCON = 0xD0;    //9位数据,可变波特率
+ 752   1          AUXR |= 0x01;   //串口1选择定时器2为波特率发生器
+ 753   1          AUXR |= 0x04;   //定时器2时钟为Fosc,即1T
+ 754   1          T2L = 0xE2;   //设定定时初值
+ 755   1          T2H = 0xFF;   //设定定时初值
+ 756   1      }
+ 757          
+ 758          void LED_flash(u8 t)
+ 759          {
+ 760   1          while(t)
+ 761   1          {
+ 762   2              LED=1;
+ 763   2              delay_ms(200);
+ 764   2              LED=0;
+ 765   2              delay_ms(200);
+ 766   2              t--;
+ 767   2          }
+ 768   1      }
+ 769          
+ 770          void initial()
+ 771          {  
+ 772   1        //设置引脚输出模式
+ 773   1        P3M0=0xff;  //P3脚均为推挽输出
+ 774   1        P3M1=0x00;
+ 775   1        
+ 776   1        P1M0=0x01;  //P10为LED推挽输出，P13为ADC高阻输入，其他均为准双向口
+ 777   1        P1M1=0x08;
+ 778   1        
+ 779   1        P5M0=0x00;  //P5两个脚为准双向口
+ 780   1        P5M1=0x00;
+ 781   1        
+ 782   1        CH1=0;
+ 783   1        CH2=0;
+ 784   1        CH3=0;
+ 785   1        CH4=0;
+ 786   1        CH5=0;
+ 787   1        CH6=0;
+ 788   1        CH7=0;
+ 789   1        CH8=0;
+ 790   1        LED=1;
+ 791   1        delay_ms(600);
+ 792   1        LED=0;
+ 793   1        RC=1;
+ 794   1        EXT=1;
+ 795   1        
+ 796   1        IAP_TPS=0x0c;  //EEPROM擦除等待时间
+ 797   1        
+ 798   1        Delay1ms();
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 14  
+
+ 799   1        
+ 800   1        if(RC==0)  //对频按键按下
+ 801   1        {
+ 802   2            delay_ms(50);
+ 803   2            if(RC==0)restar=1;  //需要重新对频
+ 804   2        }
+ 805   1        
+ 806   1        while(1)
+ 807   1        {
+ 808   2          if(EEPROM_test(2))break;  //读写检查，防止低电压无法读写
+ 809   2          else delay_ms(500);
+ 810   2        }
+ 811   1        
+ 812   1        DATA_read();
+ 813   1        data_check(out_control_data[0],1023,0);
+ 814   1        data_check(out_control_data[1],1023,0);
+ 815   1        data_check(out_control_data[2],1023,0);
+ 816   1        data_check(out_control_data[3],1023,0);
+ 817   1        data_check(out_control_data[4],1023,0);
+ 818   1        data_check(out_control_data[5],1023,0);
+ 819   1        data_check(out_control_data[6],1023,0);
+ 820   1        data_check(out_control_data[7],1023,0);
+ 821   1        
+ 822   1        NRF_test();
+ 823   1        
+ 824   1        if(NRF_error)   //模块错误闪灯
+ 825   1        {
+ 826   2            LED=0;
+ 827   2            delay_ms(1000);
+ 828   2            LED_flash(5);  //错误闪灯次数
+ 829   2        }
+ 830   1        
+ 831   1        NRF_init();
+ 832   1        
+ 833   1        if(restar)first=1;
+ 834   1        
+ 835   1        if(first)
+ 836   1        {
+ 837   2            receiver_connect();
+ 838   2        } 
+ 839   1      }
+ 840          
+ 841          void main(void)
+ 842          {
+ 843   1        delay_ms(200);//开机延时以避过电源波动
+ 844   1      
+ 845   1        initial();//初始化
+ 846   1        BGV=(u16 idata*)0xef;  //读取内部基准电压
+ 847   1      
+ 848   1        ADC_CONTR=0x80;    //ADC上电时钟初始化
+ 849   1        ADCTIM=0x3f;
+ 850   1        ADCCFG=0x2f;
+ 851   1        
+ 852   1        P_SW1=0x10;//PWM引脚切换到P3口
+ 853   1        PCA_PWM2=0x03;
+ 854   1        PCA_PWM1=0x03;
+ 855   1        
+ 856   1        if(CH1_PWM)CCAPM2=0x42;
+ 857   1        if(CH2_PWM)CCAPM1=0x42;
+ 858   1      
+ 859   1        IP=0x02; //T0高优先
+ 860   1        IE=0x82; //允许T0中断
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 15  
+
+ 861   1      
+ 862   1        if(SBUS)
+ 863   1        {
+ 864   2            UartInit();
+ 865   2            CMOD=0x01;//允许PCA中断
+ 866   2            IE2=0;
+ 867   2            CH7=1;
+ 868   2        }
+ 869   1        else
+ 870   1        {
+ 871   2            T2L=0x47,T2H=0xf4;//T2 3ms
+ 872   2            IE2=0x04;//允许T2中断
+ 873   2            CMOD=0;
+ 874   2        }
+ 875   1      
+ 876   1        TMOD=0x00;  //定时器模式0
+ 877   1        AUXR|=0x10;     //打开定时器2
+ 878   1        CCON=0x40;       //打开PCA定时器
+ 879   1      
+ 880   1        NRF_channel(hopping[0]);
+ 881   1      
+ 882   1        while(IRQ);
+ 883   1        TR0=1;
+ 884   1        lose=1;
+ 885   1      
+ 886   1        while(1)
+ 887   1        {
+ 888   2            while(IRQ&lose);
+ 889   2            if(lose)
+ 890   2            {
+ 891   3                jump_1=0;
+ 892   3                jump_2=0;
+ 893   3                hopping_count=0;//收到有效信号后刷新跳频器
+ 894   3                receive++;
+ 895   3                timer1=0;
+ 896   3                timer3=0;
+ 897   3                m=0;
+ 898   3                if(Light_LED)Light_LED=0;
+ 899   3      
+ 900   3                FIFO_read(rx,11);   //读取接收数据
+ 901   3                CE=0;
+ 902   3                REG_write(0x07,0x40); //清除无线模块中断信号
+ 903   3                CE=1;
+ 904   3      
+ 905   3                TX_mode();
+ 906   3              
+ 907   3                tx[0]=rx_num;  //第一字节为信号强度
+ 908   3              /*
+ 909   3              通过测量内部基准电压来反推单片机电压（实不相瞒我研究了半天才看懂）
+ 910   3              回传电压数值为真实电压的100倍，即voltage_bec=500代表回传电压5.00V
+ 911   3              */
+ 912   3                voltage_bec=(int)(1024L**BGV/last_adc1); 
+ 913   3                voltage_bec/=10;
+ 914   3                tx[1]=voltage_bec>>8;
+ 915   3                tx[2]=voltage_bec;
+ 916   3              /*
+ 917   3              动力电压由单片机电压参考得来，数值同样为真实电压的100倍
+ 918   3              若单片机工作在3.3V，理论可以测量0-9.9V电压，可测2S电池
+ 919   3              若单片机工作在5V，理论可以测量0-15V电压，可测3S电池
+ 920   3              */
+ 921   3                voltage_total=(long)last_adc2*voltage_bec*3/1024;
+ 922   3                tx[3]=voltage_total>>8;
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 16  
+
+ 923   3                tx[4]=voltage_total;
+ 924   3                
+ 925   3                FIFO_write(tx,11);
+ 926   3                Delay1ms();
+ 927   3      
+ 928   3                RX_mode();
+ 929   3      
+ 930   3                if(jump_mode)
+ 931   3                {
+ 932   4                    jump_mode=0;
+ 933   4                    hopping_turn=random[hopping_num];
+ 934   4                }
+ 935   3                hopping_turn++;
+ 936   3                if(hopping_turn>4)hopping_turn=0;
+ 937   3                NRF_channel(hopping[hopping_turn]);
+ 938   3      
+ 939   3                if(rx[0]==0xa2)
+ 940   3                {
+ 941   4                    Light_LED=1;
+ 942   4      
+ 943   4                    if(rx[1]&0x80)
+ 944   4                    {
+ 945   5                        PPM_OUT=1;
+ 946   5                    }
+ 947   4                    else
+ 948   4                    {
+ 949   5                        PPM_OUT=0;
+ 950   5                    }
+ 951   4      
+ 952   4                    if(rx[1]&0x40)
+ 953   4                    {
+ 954   5                        SBUS=1;
+ 955   5                    }
+ 956   4                    else
+ 957   4                    {
+ 958   5                        SBUS=0;
+ 959   5                    }
+ 960   4      
+ 961   4                    if(SBUS)
+ 962   4                    {
+ 963   5                        UartInit();
+ 964   5                        CMOD=0x01;//允许PCA中断
+ 965   5                        IE2=0;
+ 966   5                    }
+ 967   4                    else
+ 968   4                    {
+ 969   5                        T2L=0x47,T2H=0xf4;//T2 3ms
+ 970   5                        AUXR &= 0xFB;//12T
+ 971   5                        IE2=0x04;//允许T2中断
+ 972   5                        CMOD=0;
+ 973   5                    }
+ 974   4      
+ 975   4                    if(rx[1]&0x08)
+ 976   4                    {
+ 977   5                        CH1_PWM=1;
+ 978   5                        CCAPM2=0x42;
+ 979   5                    }
+ 980   4                    else
+ 981   4                    {
+ 982   5                        CH1_PWM=0;
+ 983   5                        CCAPM2=0;
+ 984   5                    }
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 17  
+
+ 985   4      
+ 986   4                    if(rx[1]&0x04)
+ 987   4                    {
+ 988   5                        CH2_PWM=1;
+ 989   5                        CCAPM1=0x42;
+ 990   5                    }
+ 991   4                    else
+ 992   4                    {
+ 993   5                        CH2_PWM=0;
+ 994   5                        CCAPM1=0;
+ 995   5                    }
+ 996   4      
+ 997   4                    if(rx[1]&0x02)
+ 998   4                    {
+ 999   5                        CH7_PWM=1;
+1000   5                        CCAPM0=0x42;
+1001   5                    }
+1002   4                    else
+1003   4                    {
+1004   5                        CH7_PWM=0;
+1005   5                        CCAPM0=0;
+1006   5                    }
+1007   4      
+1008   4                    if(rx[2]&0x80)CH1_SW=1;
+1009   4                    else CH1_SW=0;
+1010   4                    if(rx[2]&0x40)CH2_SW=1;
+1011   4                    else CH2_SW=0;
+1012   4                    if(rx[2]&0x20)CH3_SW=1;
+1013   4                    else CH3_SW=0;
+1014   4                    if(rx[2]&0x10)CH4_SW=1;
+1015   4                    else CH4_SW=0;
+1016   4                    if(rx[2]&0x08)CH5_SW=1;
+1017   4                    else CH5_SW=0;
+1018   4                    if(rx[2]&0x04)CH6_SW=1;
+1019   4                    else CH6_SW=0;
+1020   4                    if(rx[2]&0x02)CH7_SW=1;
+1021   4                    else CH7_SW=0;
+1022   4                    if(rx[2]&0x01)CH8_SW=1;
+1023   4                    else CH8_SW=0;
+1024   4      
+1025   4                    Data_change=1;
+1026   4                    timer4=0;
+1027   4                }
+1028   3                else if(rx[0]==0xa0)
+1029   3                {
+1030   4                    Light_LED=1;
+1031   4                    LED=1;
+1032   4      
+1033   4                    buff[0]=rx[1];
+1034   4                    buff[0]<<=2;
+1035   4                    buff[0]+=rx[2]>>6;
+1036   4                    buff[1]=rx[2]&0x3f;
+1037   4                    buff[1]<<=4;
+1038   4                    buff[1]+=rx[3]>>4;
+1039   4                    buff[2]=rx[3]&0x0f;
+1040   4                    buff[2]<<=6;
+1041   4                    buff[2]+=rx[4]>>2;
+1042   4                    buff[3]=rx[4]&0x03;
+1043   4                    buff[3]<<=8;
+1044   4                    buff[3]+=rx[5];
+1045   4      
+1046   4                    buff[4]=rx[6];
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 18  
+
+1047   4                    buff[4]<<=2;
+1048   4                    buff[4]+=rx[7]>>6;
+1049   4                    buff[5]=rx[7]&0x3f;
+1050   4                    buff[5]<<=4;
+1051   4                    buff[5]+=rx[8]>>4;
+1052   4                    buff[6]=rx[8]&0x0f;
+1053   4                    buff[6]<<=6;
+1054   4                    buff[6]+=rx[9]>>2;
+1055   4                    buff[7]=rx[9]&0x03;
+1056   4                    buff[7]<<=8;
+1057   4                    buff[7]+=rx[10];
+1058   4      
+1059   4                    data_check(buff[0],1023,0);
+1060   4                    data_check(buff[1],1023,0);
+1061   4                    data_check(buff[2],1023,0);
+1062   4                    data_check(buff[3],1023,0);
+1063   4                    data_check(buff[4],1023,0);
+1064   4                    data_check(buff[5],1023,0);
+1065   4                    data_check(buff[6],1023,0);
+1066   4                    data_check(buff[7],1023,0);
+1067   4      
+1068   4                    out_control_data[0]=buff[0];
+1069   4                    out_control_data[1]=buff[1];
+1070   4                    out_control_data[2]=buff[2];
+1071   4                    out_control_data[3]=buff[3];
+1072   4                    out_control_data[4]=buff[4];
+1073   4                    out_control_data[5]=buff[5];
+1074   4                    out_control_data[6]=buff[6];
+1075   4                    out_control_data[7]=buff[7];
+1076   4      
+1077   4                    Data_change=1;
+1078   4                    timer4=0;
+1079   4      
+1080   4                }
+1081   3                else if(rx[0]==0xa1)
+1082   3                {
+1083   4                    buff[0]=rx[1];
+1084   4                    buff[0]<<=2;
+1085   4                    buff[0]+=rx[2]>>6;
+1086   4                    buff[1]=rx[2]&0x3f;
+1087   4                    buff[1]<<=4;
+1088   4                    buff[1]+=rx[3]>>4;
+1089   4                    buff[2]=rx[3]&0x0f;
+1090   4                    buff[2]<<=6;
+1091   4                    buff[2]+=rx[4]>>2;
+1092   4                    buff[3]=rx[4]&0x03;
+1093   4                    buff[3]<<=8;
+1094   4                    buff[3]+=rx[5];
+1095   4      
+1096   4                    buff[4]=rx[6];
+1097   4                    buff[4]<<=2;
+1098   4                    buff[4]+=rx[7]>>6;
+1099   4                    buff[5]=rx[7]&0x3f;
+1100   4                    buff[5]<<=4;
+1101   4                    buff[5]+=rx[8]>>4;
+1102   4                    buff[6]=rx[8]&0x0f;
+1103   4                    buff[6]<<=6;
+1104   4                    buff[6]+=rx[9]>>2;
+1105   4                    buff[7]=rx[9]&0x03;
+1106   4                    buff[7]<<=8;
+1107   4                    buff[7]+=rx[10];
+1108   4      
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 19  
+
+1109   4                    data_check(buff[0],1023,0);
+1110   4                    data_check(buff[1],1023,0);
+1111   4                    data_check(buff[2],1023,0);
+1112   4                    data_check(buff[3],1023,0);
+1113   4                    data_check(buff[4],1023,0);
+1114   4                    data_check(buff[5],1023,0);
+1115   4                    data_check(buff[6],1023,0);
+1116   4                    data_check(buff[7],1023,0);
+1117   4      
+1118   4                    CH_data[0]=buff[0];
+1119   4                    CH_data[1]=buff[1];
+1120   4                    CH_data[2]=buff[2];
+1121   4                    CH_data[3]=buff[3];
+1122   4                    CH_data[4]=buff[4];
+1123   4                    CH_data[5]=buff[5];
+1124   4                    CH_data[6]=buff[6];
+1125   4                    CH_data[7]=buff[7];
+1126   4      
+1127   4                    Get_Sbus_data();
+1128   4                }
+1129   3      
+1130   3            }
+1131   2            else
+1132   2            {
+1133   3                hopping_count++;
+1134   3                if(hopping_count>5)jump_mode=1;
+1135   3      
+1136   3                if(jump_mode)
+1137   3                {
+1138   4                    hopping_num++;
+1139   4                    if(hopping_num>99)hopping_num=0;
+1140   4                    NRF_channel(hopping[random[hopping_num]]);
+1141   4                    lose=1;
+1142   4                }
+1143   3                else
+1144   3                {
+1145   4                    hopping_turn++;
+1146   4                    if(hopping_turn>4)hopping_turn=0;
+1147   4                    NRF_channel(hopping[hopping_turn]);
+1148   4                    lose=1;
+1149   4                }
+1150   3      
+1151   3            }
+1152   2      
+1153   2        }
+1154   1      
+1155   1      }
+1156          
+1157          
+1158          void ET0_isr()interrupt 1   //定时器0用作信号输出
+1159          {
+1160   1          u16 temp;
+1161   1          if(PPM_OUT)       //输出8通道PPM，PPM信号总周期20ms，
+1162   1          {
+1163   2              //每通道固定0.4ms低电平开始，0.6到1.6ms高电平结束
+1164   2              t_PPMout++;
+1165   2              switch(t_PPMout)
+1166   2              {
+1167   3              case 1:
+1168   3                  CH1=1;
+1169   3                  TL0=0x70,TH0=0xfe;
+1170   3                  temp=64935-CH_data[0];
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 20  
+
+1171   3                  T_l=temp;
+1172   3                  T_h=temp>>8;
+1173   3                  break;
+1174   3              case 2:
+1175   3                  CH1=0;
+1176   3                  TL0=T_l;
+1177   3                  TH0=T_h;
+1178   3                  break;
+1179   3              case 3:
+1180   3                  CH1=1;
+1181   3                  TL0=0x70,TH0=0xfe;
+1182   3                  temp=64935-CH_data[1];
+1183   3                  T_l=temp;
+1184   3                  T_h=temp>>8;
+1185   3                  break;
+1186   3              case 4:
+1187   3                  CH1=0;
+1188   3                  TL0=T_l;
+1189   3                  TH0=T_h;
+1190   3                  break;
+1191   3              case 5:
+1192   3                  CH1=1;
+1193   3                  TL0=0x70,TH0=0xfe;
+1194   3                  temp=64935-CH_data[2];
+1195   3                  T_l=temp;
+1196   3                  T_h=temp>>8;
+1197   3                  break;
+1198   3              case 6:
+1199   3                  CH1=0;
+1200   3                  TL0=T_l;
+1201   3                  TH0=T_h;
+1202   3                  break;
+1203   3              case 7:
+1204   3                  CH1=1;
+1205   3                  TL0=0x70,TH0=0xfe;
+1206   3                  temp=64935-CH_data[3];
+1207   3                  T_l=temp;
+1208   3                  T_h=temp>>8;
+1209   3                  break;
+1210   3              case 8:
+1211   3                  CH1=0;
+1212   3                  TL0=T_l;
+1213   3                  TH0=T_h;
+1214   3                  break;
+1215   3              case 9:
+1216   3                  CH1=1;
+1217   3                  TL0=0x70,TH0=0xfe;
+1218   3                  temp=64935-CH_data[4];
+1219   3                  T_l=temp;
+1220   3                  T_h=temp>>8;
+1221   3                  break;
+1222   3              case 10:
+1223   3                  CH1=0;
+1224   3                  TL0=T_l;
+1225   3                  TH0=T_h;
+1226   3                  break;
+1227   3              case 11:
+1228   3                  CH1=1;
+1229   3                  TL0=0x70,TH0=0xfe;
+1230   3                  temp=64935-CH_data[5];
+1231   3                  T_l=temp;
+1232   3                  T_h=temp>>8;
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 21  
+
+1233   3                  break;
+1234   3              case 12:
+1235   3                  CH1=0;
+1236   3                  TL0=T_l;
+1237   3                  TH0=T_h;
+1238   3                  break;
+1239   3              case 13:
+1240   3                  CH1=1;
+1241   3                  TL0=0x70,TH0=0xfe;
+1242   3                  temp=64935-CH_data[6];
+1243   3                  T_l=temp;
+1244   3                  T_h=temp>>8;
+1245   3                  break;
+1246   3              case 14:
+1247   3                  CH1=0;
+1248   3                  TL0=T_l;
+1249   3                  TH0=T_h;
+1250   3                  break;
+1251   3              case 15:
+1252   3                  CH1=1;
+1253   3                  TL0=0x70,TH0=0xfe;
+1254   3                  temp=64935-CH_data[7];
+1255   3                  T_l=temp;
+1256   3                  T_h=temp>>8;
+1257   3                  break;
+1258   3              case 16:
+1259   3                  CH1=0;
+1260   3                  TL0=T_l;
+1261   3                  TH0=T_h;
+1262   3                  break;
+1263   3              case 17:
+1264   3                  CH1=1;
+1265   3                  TL0=0x70,TH0=0xfe;
+1266   3                  break;
+1267   3              case 18:
+1268   3                  CH1=0;
+1269   3                  TL0=0xf0,TH0=0xd8;
+1270   3                  t_PPMout=0;
+1271   3                  break;
+1272   3              }
+1273   2          }
+1274   1          else if(SBUS)
+1275   1          {
+1276   2              CH7=1;
+1277   2              if(t_sbus>24)
+1278   2              {
+1279   3                  t_sbus=0;
+1280   3              }
+1281   2              else
+1282   2              {
+1283   3      
+1284   3                  if(TI)TI=0;
+1285   3                  ACC=Sbus_tx[t_sbus];
+1286   3                  TB8=P;
+1287   3                  SBUF=ACC;
+1288   3      
+1289   3                  t_sbus++;
+1290   3              }
+1291   2      
+1292   2              if(t_sbus==25)
+1293   2              {
+1294   3                  TL0=0xF0;
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 22  
+
+1295   3                  TH0=0xD8;//10ms
+1296   3              }
+1297   2              else
+1298   2              {
+1299   3                  TL0=0x88;
+1300   3                  TH0=0xFF;//120us
+1301   3              }
+1302   2      
+1303   2          }
+1304   1          else
+1305   1          {
+1306   2              t_output++;
+1307   2              switch(t_output)
+1308   2              {
+1309   3      
+1310   3              case 1:
+1311   3                  if(CH1_PWM)//输出PWM
+1312   3                  {
+1313   4                      if(CH_data[0]<100)
+1314   4                      {
+1315   5                          PCA_PWM2=0x03;
+1316   5                      }
+1317   4                      else
+1318   4                      {
+1319   5                          PCA_PWM2=0x00;
+1320   5                      }
+1321   4                      CCAP2H=255-CH_data[0]/4;
+1322   4                  }
+1323   3                  else
+1324   3                  {
+1325   4                      if(CH1_SW)//输出电平信号
+1326   4                      {
+1327   5                          if(CH_data[0]<500)CH1=0;
+1328   5                          else CH1=1;
+1329   5                      }
+1330   4                      else CH1=1; //输出舵量
+1331   4                  }
+1332   3      
+1333   3                  temp2=128600-temp1;
+1334   3                  TL0=temp2,TH0=temp2>>8;
+1335   3                  break;
+1336   3      
+1337   3              case 2:
+1338   3                  if(CH1_PWM==0)
+1339   3                  {
+1340   4                      if(CH1_SW==0)CH1=0;
+1341   4                  }
+1342   3      
+1343   3                  temp1=64725-CH_data[1]*27/20;
+1344   3                  TL0=temp1,TH0=temp1>>8;
+1345   3                  break;
+1346   3      
+1347   3              case 3:
+1348   3                  if(CH2_PWM)
+1349   3                  {
+1350   4                      if(CH_data[1]<100)
+1351   4                      {
+1352   5                          PCA_PWM1=0x03;
+1353   5                      }
+1354   4                      else
+1355   4                      {
+1356   5                          PCA_PWM1=0x00;
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 23  
+
+1357   5                      }
+1358   4                      CCAP1H=255-CH_data[1]/4;
+1359   4                  }
+1360   3                  else
+1361   3                  {
+1362   4                      if(CH2_SW)
+1363   4                      {
+1364   5                          if(CH_data[1]<500)CH2=0;
+1365   5                          else CH2=1;
+1366   5                      }
+1367   4                      else CH2=1;
+1368   4                  }
+1369   3      
+1370   3                  temp2=128600-temp1;
+1371   3                  TL0=temp2,TH0=temp2>>8;
+1372   3                  break;
+1373   3      
+1374   3              case 4:
+1375   3                  if(CH2_PWM==0)
+1376   3                  {
+1377   4                      if(CH2_SW==0)CH2=0;
+1378   4                  }
+1379   3      
+1380   3                  temp1=64725-CH_data[2]*27/20;
+1381   3                  TL0=temp1,TH0=temp1>>8;
+1382   3                  break;
+1383   3      
+1384   3              case 5:
+1385   3                  if(CH3_SW)
+1386   3                  {
+1387   4                      if(CH_data[2]<500)CH3=0;
+1388   4                      else CH3=1;
+1389   4                  }
+1390   3                  else CH3=1;
+1391   3      
+1392   3                  temp2=128600-temp1;
+1393   3                  TL0=temp2,TH0=temp2>>8;
+1394   3                  break;
+1395   3      
+1396   3              case 6:
+1397   3                  if(CH3_SW==0)CH3=0;
+1398   3      
+1399   3                  temp1=64725-CH_data[3]*27/20;
+1400   3                  TL0=temp1,TH0=temp1>>8;
+1401   3                  break;
+1402   3      
+1403   3              case 7:
+1404   3                  if(CH4_SW)
+1405   3                  {
+1406   4                      if(CH_data[3]<500)CH4=0;
+1407   4                      else CH4=1;
+1408   4                  }
+1409   3                  else CH4=1;
+1410   3      
+1411   3                  temp2=128600-temp1;
+1412   3                  TL0=temp2,TH0=temp2>>8;
+1413   3                  break;
+1414   3      
+1415   3              case 8:
+1416   3                  if(CH4_SW==0)CH4=0;
+1417   3      
+1418   3                  temp1=64725-CH_data[4]*27/20;
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 24  
+
+1419   3                  TL0=temp1,TH0=temp1>>8;
+1420   3                  break;
+1421   3      
+1422   3              case 9:
+1423   3                  if(CH5_SW)
+1424   3                  {
+1425   4                      if(CH_data[4]<500)CH5=0;
+1426   4                      else CH5=1;
+1427   4                  }
+1428   3                  else CH5=1;
+1429   3      
+1430   3                  temp2=128600-temp1;
+1431   3                  TL0=temp2,TH0=temp2>>8;
+1432   3                  break;
+1433   3      
+1434   3              case 10:
+1435   3                  if(CH5_SW==0)CH5=0;
+1436   3      
+1437   3                  temp1=64725-CH_data[5]*27/20;
+1438   3                  TL0=temp1,TH0=temp1>>8;
+1439   3                  break;
+1440   3      
+1441   3      
+1442   3              case 11:
+1443   3                  if(CH6_SW)
+1444   3                  {
+1445   4                      if(CH_data[5]<500)CH6=0;
+1446   4                      else CH6=1;
+1447   4                  }
+1448   3                  else CH6=1;
+1449   3      
+1450   3                  temp2=128600-temp1;
+1451   3                  TL0=temp2,TH0=temp2>>8;
+1452   3                  break;
+1453   3      
+1454   3              case 12:
+1455   3                  if(CH6_SW==0)CH6=0;
+1456   3      
+1457   3                  temp1=64725-CH_data[6]*27/20;
+1458   3                  TL0=temp1,TH0=temp1>>8;
+1459   3                  break;
+1460   3      
+1461   3              case 13:
+1462   3                  if(CH7_SW)
+1463   3                  {
+1464   4                      if(CH_data[6]<500)CH7=0;
+1465   4                      else CH7=1;
+1466   4                  }
+1467   3                  else CH7=1;
+1468   3      
+1469   3                  temp2=128600-temp1;
+1470   3                  TL0=temp2,TH0=temp2>>8;
+1471   3                  break;
+1472   3      
+1473   3              case 14:
+1474   3                  if(CH7_SW==0)CH7=0;
+1475   3      
+1476   3                  temp1=64725-CH_data[7]*27/20;
+1477   3                  TL0=temp1,TH0=temp1>>8;
+1478   3                  break;
+1479   3      
+1480   3              case 15:
+C51 COMPILER V9.60.0.0   LOLI3_RX8_A10_5                                                   07/07/2020 11:09:27 PAGE 25  
+
+1481   3                  if(CH8_SW)
+1482   3                  {
+1483   4                      if(CH_data[7]<500)CH8=0;
+1484   4                      else CH8=1;
+1485   4                  }
+1486   3                  else CH8=1;
+1487   3      
+1488   3                  temp2=128600-temp1;
+1489   3                  TL0=temp2,TH0=temp2>>8;
+1490   3                  break;
+1491   3      
+1492   3              case 16:
+1493   3                  if(CH8_SW==0)CH8=0;
+1494   3      
+1495   3                  temp1=64725-CH_data[0]*27/20;
+1496   3                  TL0=temp1,TH0=temp1>>8;
+1497   3              
+1498   3                  t_output=0;
+1499   3                  break;
+1500   3              }
+1501   2          }
+1502   1      }
+1503          
+1504          void PCA_isr()interrupt 7
+1505          {
+1506   1          CL=0x48,CH=0xf4;    //3ms
+1507   1          CCON=0x40;
+1508   1      
+1509   1          Cycle();
+1510   1      }
+1511          
+1512          void et2()interrupt 12  //跳频定时器 3ms
+1513          {
+1514   1          Cycle();
+1515   1      }
+1516          
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   6132    ----
+   CONSTANT SIZE    =    105    ----
+   XDATA SIZE       =    220      16
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =     16    ----
+   IDATA SIZE       =      8    ----
+   BIT SIZE         =     21    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
